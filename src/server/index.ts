@@ -1,4 +1,4 @@
-import { Devvit, Context } from '@devvit/public-api';
+import { Context } from '@devvit/public-api';
 import { Hono } from 'hono';
 import { redis, scheduler } from '@devvit/web/server';
 
@@ -79,7 +79,7 @@ app.post('/api/lock-wagers', async (c) => {
 });
 
 /* -------------------------
-   4. Schedule wager lock route (called by moderator menu action)
+   4. Schedule wager lock route
    ------------------------- */
 app.post('/api/schedule-lock', async (c) => {
   try {
