@@ -5,7 +5,6 @@
     "dir": "dist/client",
     "entrypoints": {
       "default": {
-        "inline": true,
         "entry": "splash.html"
       },
       "game": {
@@ -13,6 +12,7 @@
       }
     }
   },
+
   "server": {
     "dir": "dist/server",
     "entry": "index.cjs"
@@ -44,5 +44,8 @@
   "scripts": {
     "dev": "vite build --watch",
     "build": "vite build"
+  },
+  "permissions": {
+    "redis": true
   }
-}
+  }
