@@ -9,22 +9,8 @@ const app = new Hono();
    ------------------------- */
 export async function onAppInstall(_ctx: Context) {
   console.log('OnAppInstall start', new Date().toISOString());
-  try {
-    setTimeout(async () => {
-      try {
-        console.log('Background install work started', new Date().toISOString());
-        console.log('Background install work finished', new Date().toISOString());
-      } catch (bgErr) {
-        console.error('Background install work failed', bgErr);
-      }
-    }, 0);
-
-    console.log('OnAppInstall quick return', new Date().toISOString());
-    return { success: true };
-  } catch (err) {
-    console.error('OnAppInstall error', err);
-    throw err;
-  }
+  console.log('OnAppInstall complete', new Date().toISOString());
+  return { success: true };
 }
 
 /* -------------------------
