@@ -1,6 +1,6 @@
 import { Devvit, Context } from '@devvit/public-api';
 import { Hono } from 'hono';
-import { redis } from '@devvit/redis';
+import { redis, scheduler } from '@devvit/web/server';
 
 const app = new Hono();
 
@@ -14,7 +14,16 @@ export async function onAppInstall(_ctx: Context) {
 }
 
 /* -------------------------
-   1. Bet placement route with logging and defensive Redis usage
+   1. OnAppInstall trigger
+   ------------------------- */
+app.post('/internal/triggers/on-app-install', async (c) => {
+  console.log('OnAppInstall start', new Date().toISOString());
+  console.log('OnAppInstall complete', new Date().toISOString());
+  return c.json({ success: true });
+});
+
+/* -------------------------
+   2. Bet placement route
    ------------------------- */
 app.post('/api/place-bet', async (c) => {
   console.log('place-bet called', new Date().toISOString());
@@ -28,52 +37,25 @@ app.post('/api/place-bet', async (c) => {
     }
 
     const lockKey = `event:${eventId}:locked`;
-    console.log('Checking lockKey', lockKey);
     const isLocked = await redis.get(lockKey);
     if (isLocked === 'true') {
-      console.info('Wagers locked for event', eventId);
       return c.json({ success: false, error: 'Wagers are officially locked for this event.' }, 403);
     }
 
     const balanceKey = `user:${userId}:balance`;
     const betKey = `bet:${eventId}:${userId}`;
 
-    console.log('Starting optimistic transaction for', balanceKey);
-    // Defensive: ensure redis.watch returns a transaction-like object for your client
-    const txn = await redis.watch(balanceKey);
-    if (!txn) {
-      console.error('Redis watch failed or returned falsy txn');
-      return c.json({ success: false, error: 'Internal Server Error' }, 500);
+    const currentRaw = await redis.get(balanceKey);
+    const currentBalance = currentRaw ? Number.parseInt(currentRaw, 10) : 0;
+
+    if (currentBalance < stake) {
+      return c.json({ success: false, error: 'Insufficient community tokens.' }, 400);
     }
 
-    try {
-      const currentRaw = (await txn.get(balanceKey)) as unknown as string | null;
-      const currentBalance = currentRaw ? Number.parseInt(currentRaw, 10) : 0;
-      console.log('Current balance', currentBalance);
+    await redis.set(balanceKey, String(currentBalance - stake));
+    await redis.set(betKey, JSON.stringify({ fighterId, method, round, stake, timestamp: Date.now() }));
 
-      if (currentBalance < stake) {
-        await txn.unwatch();
-        console.info('Insufficient balance', { userId, currentBalance, stake });
-        return c.json({ success: false, error: 'Insufficient community tokens.' }, 400);
-      }
-
-      await txn.multi();
-      await txn.set(balanceKey, String(currentBalance - stake));
-      await txn.set(betKey, JSON.stringify({ fighterId, method, round, stake, timestamp: Date.now() }));
-
-      const result = await txn.exec();
-      if (result === null) {
-        console.warn('Transaction collision for', balanceKey);
-        return c.json({ success: false, error: 'Transaction collision. Please try again.' }, 409);
-      }
-
-      console.log('Transaction success', { userId, newBalance: currentBalance - stake });
-      return c.json({ success: true, newBalance: currentBalance - stake });
-    } catch (txnErr) {
-      console.error('Transaction error', txnErr);
-      try { await txn.unwatch(); } catch (uErr) { console.error('unwatch failed', uErr); }
-      return c.json({ success: false, error: 'Internal Server Error' }, 500);
-    }
+    return c.json({ success: true, newBalance: currentBalance - stake });
   } catch (error) {
     console.error('Bet placement failed:', error);
     return c.json({ success: false, error: 'Internal Server Error' }, 500);
@@ -81,58 +63,38 @@ app.post('/api/place-bet', async (c) => {
 });
 
 /* -------------------------
-   2. Register scheduler job defensively
+   3. Lock wagers route (called by scheduler)
    ------------------------- */
-try {
-  Devvit.addSchedulerJob({
-    name: 'lock_wagers',
-    onRun: async (event, context) => {
-      const { eventId } = event.data as { eventId: string };
-      const lockKey = `event:${eventId}:locked`;
-      console.log('lock_wagers onRun start', eventId, new Date().toISOString());
-      try {
-        await context.redis.set(lockKey, 'true');
-        console.log(`Successfully locked wagers for event: ${eventId}`);
-      } catch (error) {
-        console.error(`Failed to lock wagers for ${eventId}:`, error);
-      }
-    },
-  });
-  console.log('Scheduler job registered: lock_wagers');
-} catch (err) {
-  console.error('Failed to register scheduler job', err);
-}
+app.post('/api/lock-wagers', async (c) => {
+  try {
+    const { eventId } = await c.req.json();
+    const lockKey = `event:${eventId}:locked`;
+    await redis.set(lockKey, 'true');
+    console.log(`Successfully locked wagers for event: ${eventId}`);
+    return c.json({ success: true });
+  } catch (error) {
+    console.error('Failed to lock wagers:', error);
+    return c.json({ success: false, error: 'Internal Server Error' }, 500);
+  }
+});
 
 /* -------------------------
-   3. Register moderator menu defensively
+   4. Schedule wager lock route (called by moderator menu action)
    ------------------------- */
-try {
-  Devvit.addMenuItem({
-    location: 'subreddit',
-    label: 'Oracle: Schedule Saturday Lock',
-    forUserType: 'moderator',
-    onPress: async (_event, context) => {
-      console.log('Menu onPress invoked', new Date().toISOString());
-      const eventId = 'ufc_300';
-      const lockTime = new Date('2026-06-20T18:00:00.000Z');
+app.post('/api/schedule-lock', async (c) => {
+  try {
+    const { eventId, lockTime } = await c.req.json();
+    await scheduler.runJob({
+      name: 'lock_wagers',
+      data: { eventId },
+      runAt: new Date(lockTime),
+    });
+    console.log('Scheduled lock_wagers', { eventId, lockTime });
+    return c.json({ success: true });
+  } catch (error) {
+    console.error('Failed to schedule lock:', error);
+    return c.json({ success: false, error: 'Internal Server Error' }, 500);
+  }
+});
 
-      try {
-        await context.scheduler.runJob({
-          name: 'lock_wagers',
-          data: { eventId },
-          runAt: lockTime,
-        });
-        context.ui.showToast(`Wagers scheduled to lock at ${lockTime.toLocaleString()}`);
-        console.log('Scheduled lock_wagers', { eventId, lockTime: lockTime.toISOString() });
-      } catch (err) {
-        console.error('Failed to schedule job from menu', err);
-        context.ui.showToast('Failed to schedule wager lock. See logs.');
-      }
-    },
-  });
-  console.log('Menu item registered');
-} catch (err) {
-  console.error('Failed to register menu item', err);
-}
-
-export default app;
+export { app };
